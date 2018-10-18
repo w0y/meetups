@@ -24,9 +24,11 @@ Meetup-Kickoff and overview of tools we regularly use.
 * [IDA](https://www.hex-rays.com/products/ida/) - Disassembler
 * [gdb](https://www.gnu.org/software/gdb/) - Dynamic analysis/debugging
 * [qira](https://qira.me/) - Timeless debugging
+* [checksec.sh](https://github.com/slimm609/checksec.sh) - Check for exploit mitigation measures
 
 ### Data Analysis
 
+* [binwalk](https://github.com/ReFirmLabs/binwalk.git) - Extracting files from a blob
 * [wireshark](https://www.wireshark.org/) - Analyzing/Recording network dumps
 * [tcpdump](http://www.tcpdump.org/) - Same, but on the command line
 
