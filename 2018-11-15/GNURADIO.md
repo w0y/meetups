@@ -29,8 +29,8 @@ r[r < 0.5] = 0
 r[r > 0.5] = 1
 
 # Find start/end of the signal
-start = np.where(r==1)[0]
-end = np.where(r==1)[-1]
+start = np.where(r==1)[0][0]
+end = np.where(r==1)[0][-1]
 length = int(np.ceil((end - start) / 100))
 
 # Plot signal from start to end
