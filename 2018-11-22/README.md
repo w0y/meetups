@@ -116,7 +116,7 @@ simulation_manager.explore(find=address)
 print(simulation_manager)
 ```
 
-# Reading and Writing Memory
+## Reading and Writing Memory
 
 Reading and writing memory works with the ```mem``` attribute of an execution state. In pseudocode, this approximately looks like this, where we swap ADDRESS by the address we want to read and DATATYPE by the type of data we want to treat the memory as:
 
@@ -130,3 +130,59 @@ Usually, the DATATYPE corresponds to the length of the data type we want to read
 state.mem[0x1234].byte = 0x41
 ``` 
 
+Besides reading/writing memory, you can do the same for registers, which are accessed through the ```regs``` attribute. You can access the usual x86-64 registers, e.g. finding the value of the second argument of a function call:
+
+```python
+simgr = proj.factory.simgr()
+simgr.explore(find=FUNCTION_ADDRESS)
+second_arg = simgr.found[0].regs.rsi
+```
+
+If you combine ```mem``` and ```regs``` you can do nifty stuff, like accessing local variables. This is helpful, since if we want to retrieve a function argument and explore by string, by the time printf is called, the arguments won't be in ```rdi```, ```rsi```, etc. anymore. Disassemblers (radare2 and IDA at least) give you the address of a local variable relative to the stack frame, and you can just copy and paste this into your Python script:
+
+```python
+simgr.explore(find=lambda s: b"Payment reference:" in s.posix.dumps(1))
+s = simgr.found[0]
+var = s.mem[s.regs.rbp - 0x18].qword.resolved;
+```
+
+If you access the memory via ```mem``` it still carries some information for symbolic execution and if you do ```s.mem[s.mem[s.regs.rbp - 0x18].qword]``` you'll probably get an error. This is why we added the ```.resolved``` after the qword, getting rid of the symbolic information and retrieving the actual value.
+
+## Constraint Solving
+
+Now we've reached the part where we combine everything up until now and use **angr** to specify actual constraints and solve them. One additional thing we need to know is that **angr** internally does not have a concept of integers or addresses, but works with bitvectors with a certain size. If you have a ```byte``` that gives you a bitvector with length 8; so far so good. However, instead of having a bitvector with a concrete value, a ```BVV```, you can also introduce a symbol with a specified length and name, but no actual value, a ```BVS```. (*Sidenote*: It appears the name of a variable doesn't actually matter at all and is probably only used for pretty-printing). If you have a state, you can create a symbolic variable like this:
+
+```python
+symbolic_byte = state.solver.BVS('x', 8)
+```
+
+If we want to create an array of symbolic values, e.g. symbolic bytes of a key, we can just create symbolic variables in a loop. You can also assign symbolic variables to memory addresses directly, so if the key is stored in a buffer, we can just do this:
+
+```python
+for i in range(KEY_LENGTH):
+    state.mem[key_addr+i:].byte = state.solver.BVS('key', 8)
+``` 
+
+The workflow for constraint solving is usually ordered this way:
+
+1. Set up state/call_state
+2. Declare symbolic variables
+3. Use a simulation manager to explore/reach the target state
+4. Add constraints
+5. Solve for the constraints
+
+Since we set up our symbolic variables (and presumably reached our target state), we can now set the constraints for our solution. In the case of **ragequit** we receive some kind of payment reference that is printed to stdout. This doesn't map directly to **ragequit**, but we assume that the output we want to use as constraint is also loaded into a buffer and we can then do this:
+
+```python
+state = simgr.found[0]
+for i in range(BUFF_SIZE):
+    b = state.memory.load(BUFF_ADDRESS + i, 1)
+    state.add_constraints(b == TARGET_VALUES[i])
+```
+
+After this, we leave it to **angr** to do the work for us. The only thing left we need to specify is what we actually want to evaluate. And what we want to evaluate is the key we don't know:
+
+```python
+keyvar = state.memory.load(key_addr, KEY_LENGTH)
+key_bytes = state.solver.eval(keyvar, cast_to=bytes)
+```
