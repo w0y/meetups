@@ -186,3 +186,196 @@ After this, we leave it to **angr** to do the work for us. The only thing left w
 keyvar = state.memory.load(key_addr, KEY_LENGTH)
 key_bytes = state.solver.eval(keyvar, cast_to=bytes)
 ```
+
+## Specific Example
+
+Now lets have a look at a specific example. Here's a program which is a very simplified version of **ragequit**:
+
+```c
+// Compile with: gcc -no-pie -O0 ex2.c -o ex2
+#include <stdio.h>
+#include <stdlib.h>
+
+const char *SECRET = "THE_SECRET_WAS_HERE";
+
+void print_scrambled(const unsigned char *scrambled) {
+    puts("Scrambled secret is:");
+    for (int i = 0; i < 19; i++)
+        printf("%02x", scrambled[i]);
+    puts("");
+}
+
+void crack_me(const char *flag) {
+    unsigned char scramble_buffer[19];
+
+    // Welcome message, so we can find the function per string
+    puts("Welcome!");
+
+    // Just shuffle the characters randomly
+    scramble_buffer[ 0] = SECRET[10];
+    scramble_buffer[ 1] = SECRET[ 4];
+    scramble_buffer[ 2] = SECRET[15];
+    scramble_buffer[ 3] = SECRET[14];
+    scramble_buffer[ 4] = SECRET[12];
+    scramble_buffer[ 5] = SECRET[ 1];
+    scramble_buffer[ 6] = SECRET[18];
+    scramble_buffer[ 7] = SECRET[ 6];
+    scramble_buffer[ 8] = SECRET[ 7];
+    scramble_buffer[ 9] = SECRET[11];
+    scramble_buffer[10] = SECRET[ 3];
+    scramble_buffer[11] = SECRET[16];
+    scramble_buffer[12] = SECRET[ 8];
+    scramble_buffer[13] = SECRET[ 5];
+    scramble_buffer[14] = SECRET[ 0];
+    scramble_buffer[15] = SECRET[13];
+    scramble_buffer[16] = SECRET[17];
+    scramble_buffer[17] = SECRET[ 2];
+    scramble_buffer[18] = SECRET[ 9];
+
+    // XOR each character with the last one
+    for (int i = 1; i < 19; i++)
+        scramble_buffer[i] ^= scramble_buffer[i - 1];
+
+    // Print the scrambled result
+    print_scrambled(scramble_buffer);
+}
+
+int main(int argc, char **argv) { 
+    crack_me(SECRET);
+    return EXIT_SUCCESS;
+}
+```
+
+And this is the output it produced when it was executed with the real secret:
+
+```
+Welcome!
+Scrambled secret is:
+4512571a5d12337d227d22035718410021743c
+```
+
+Now you can easily reverse this program by hand, but this should only serve as a basic example of the concepts described in the previous sections. The following will be a step-by-step guide on how you can approach solving this example (and how you can approach solving **ragequit**, since the programs are similiar). The full code is available in the *tutorials* folder as *ex2.py*. Let's start with creating an angr project:
+
+```python
+import angr
+
+proj = angr.Project('./ex2', auto_load_libs=False)
+```
+
+So first thing we want to do is find the address of the crackme function. Conveniently, this function prints the string "Welcome!" so we can just explore for this string:
+
+```python
+# Creating a simulation manager and explore for the "Welcome!" string.
+# Instead of creating a find function, we can just use a lambda function.
+# Hint: ragequit's equivalent to "Welcome!" is "SUPER ENCRYPTED FILE BACKUP"
+simgr = proj.factory.simgr()
+simgr.explore(find=lambda s: b"Welcome!" in s.posix.dumps(1))
+
+# We take the state we found and get the address of the current function,
+# which is crackme(const char *).
+state = simgr.found[0]
+crackme_addr = state.callstack.func_addr
+```
+
+If we used a disassembler and checked which local variable the function argument was stored in, we could extract the address to the function argument from this state as well. We're too lazy to disassemble the program for now and just use another exploration to jump to the beginning of the ```crackme``` function. Then we can extract the argument, the pointer to the memory where the secret is stored, from ```rdi``` (check the Linux amd64 calling conventions for reference):
+
+```python
+# Use a simulation manager to directly find the address of crackme(const char *).
+simgr = proj.factory.simgr()
+simgr.explore(find=crackme_addr)
+
+# Retrieve the value of the first argument, which is the address of the secret
+state = simgr.found[0]
+secret_addr = state.regs.rdi
+```
+
+We now know the address of ```crackme``` as well as the parameter we need to pass in. This is enough for us to construct a ```call_state``` which we can use as a starting point when creating new simulation managers. This way, we won't have to start over from the beginning of the program, but can start directly with the function call. (*Sidenote*: technically we should be able to use the state we just found (at the beginning of ```crackme```) for this exact purpose, however it's good to know how we can construct an explicit call state). Constructing the ```call_state``` looks like this:
+
+```python
+cstate = proj.factory.call_state(crackme_addr, secret_addr)
+```
+
+This gives us the starting state for our simulation, but what do we use as the target state? Well, we can start from ```cstate```, which we just constructed, and explore till we find ```print_scrambled```. This is basically just rinse and repeat of the commands we used to find ```crackme``` and its argument, but this time we start from ```cstate``` instead of the program entry point:
+
+```python
+# Creating a simulation manager and explore for the "Scrambled secret is:" string.
+# Hint: ragequit's equivalent would be "Payment reference:"
+# Also: note that we are now using cstate to initialize a simulation manager
+simgr = proj.factory.simgr(cstate)
+simgr.explore(find=lambda s: b"Scrambled secret is:" in s.posix.dumps(1))
+
+# We take the state we found and get the address of the current function,
+# which is print_scrambled(const unsigned char *).
+state = simgr.found[0]
+print_addr = state.callstack.func_addr
+
+# Use a simulation manager to directly find the address
+# of print_scrambled(const unsigned char *).
+simgr = proj.factory.simgr(cstate)
+simgr.explore(find=print_addr)
+
+# Retrieve the value of the first argument, which is the address of
+# the scrambling buffer
+state = simgr.found[0]
+scrambled_addr = state.regs.rdi
+```
+
+Now we have everything we need to set up our symbolic variables, constraints and solve for the secret. First, create symbolic variables for each character of the secret in the memory of the call state:
+
+```python
+# The secret is 19 characters long, each character/byte gets its own
+# symbolic variable
+for i in range(19):
+    cstate.mem[secret_addr + i].byte = cstate.solver.BVS('key', 8)
+```
+
+Next, explore the simulation till we reached our target state:
+
+```python
+# Go to print_scrambled
+simgr = proj.factory.simgr(cstate)
+simgr.explore(find=print_addr)
+
+# Store target state
+target_state = simgr.found[0]
+```
+
+Next, add the constraints to the target state. We want the output of ```print_scrambled``` to produce the same output as if it would be using the real secret, i.e. *4512571a5d12337d227d22035718410021743c*. We therefore add a constraint for every byte of
+the output:
+
+```python
+# Convert the input to bytes and constrain the actual bytes of the
+# buffer to be equal to the bytes from the output
+target_bytes = bytes.fromhex("4512571a5d12337d227d22035718410021743c")
+for i in range(19):
+    buffer_byte = target_state.memory.load(scrambled_addr + i, 1)
+    target_byte = target_bytes[i];
+    target_state.add_constraints(buffer_byte == target_byte)
+```
+
+And in the final step, we solve for the secret:
+
+```python
+# Load all the secret bytes into a variable
+secret = target_state.memory.load(secret_addr, 19)
+print(target_state.solver.eval(secret, cast_to=bytes))
+```
+
+## Hints for ragequit
+
+The basic structure of **ragequit** is relatively close to the example. To sketch the basic control flow:
+
+```c
+int main(int argc, char **argv) {
+    // Print 'SUPER ENCRYPTED FILE BACKUP' header
+    crackme(0, key);
+
+    // Do weird encryption stuff
+    // ...
+
+    // Do the actual scrambling
+    crackme(1, key);
+}
+```
+
+It also has its own equivalent of the ```print_scrambled``` function, i.e. where the "Payment reference" is printed.
