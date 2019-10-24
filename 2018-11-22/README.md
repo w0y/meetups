@@ -361,21 +361,3 @@ secret = target_state.memory.load(secret_addr, 19)
 print(target_state.solver.eval(secret, cast_to=bytes))
 ```
 
-## Hints for ragequit
-
-The basic structure of **ragequit** is relatively close to the example. To sketch the basic control flow:
-
-```c
-int main(int argc, char **argv) {
-    // Print 'SUPER ENCRYPTED FILE BACKUP' header
-    crackme(0, key);
-
-    // Do weird encryption stuff
-    // ...
-
-    // Do the actual scrambling
-    crackme(1, key);
-}
-```
-
-It also has its own equivalent of the ```print_scrambled``` function, i.e. where the "Payment reference" is printed.
